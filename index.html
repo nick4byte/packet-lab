@@ -1,0 +1,903 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body style="margin:0">
+<title>封包觀察站</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+/* 版面概念：上方工具列 + 封包清單，下方左「逐層解析」右「原始 bytes」，第二分頁為封包打造器 */
+:root{
+  --bg:#f3f5f8;
+  --panel:#ffffff;
+  --panel2:#eef1f6;
+  --fg:#1c2733;
+  --muted:#5b6b7d;
+  --line:#d7dee8;
+  --accent:#0e7f8c;
+  --accent-soft:#d9eef1;
+  --sel:#fff3cf;
+  --warn:#b45309;
+  --warn-bg:#fdf1dd;
+  --c-tcp:#2563eb; --c-udp:#7c3aed; --c-dns:#b45309; --c-http:#15803d;
+  --c-icmp:#be185d; --c-arp:#475569; --c-tls:#4338ca;
+  --ly0:#eceff4; --ly1:#e3edfb; --ly2:#ece5fb; --ly3:#e2f3e6;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f141b; --panel:#161d26; --panel2:#1d2631; --fg:#e4ebf3; --muted:#93a3b5;
+    --line:#2b3645; --accent:#3cc3d2; --accent-soft:#113b42; --sel:#4a3c12;
+    --warn:#f0b36b; --warn-bg:#3a2a12;
+    --c-tcp:#6ca2ff; --c-udp:#b08cff; --c-dns:#e3a051; --c-http:#58c27a;
+    --c-icmp:#f077a8; --c-arp:#9aa8b8; --c-tls:#9b93ff;
+    --ly0:#232b36; --ly1:#1c2b41; --ly2:#2a2340; --ly3:#1d3326;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --panel:#161d26; --panel2:#1d2631; --fg:#e4ebf3; --muted:#93a3b5;
+  --line:#2b3645; --accent:#3cc3d2; --accent-soft:#113b42; --sel:#4a3c12;
+  --warn:#f0b36b; --warn-bg:#3a2a12;
+  --c-tcp:#6ca2ff; --c-udp:#b08cff; --c-dns:#e3a051; --c-http:#58c27a;
+  --c-icmp:#f077a8; --c-arp:#9aa8b8; --c-tls:#9b93ff;
+  --ly0:#232b36; --ly1:#1c2b41; --ly2:#2a2340; --ly3:#1d3326;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{
+  background:var(--bg); color:var(--fg); font-family:var(--sans);
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0 32px;
+  line-height:1.6;
+}
+.wrap{max-width:1180px;margin:0 auto}
+header.top{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px;padding:20px 0 4px}
+header.top h1{font-size:22px;font-weight:700;margin:0;letter-spacing:.5px}
+header.top .sub{color:var(--muted);font-size:13px}
+.tabs{display:flex;gap:8px;margin:12px 0 14px;flex-wrap:wrap}
+.tabs button{
+  font:inherit;font-size:14px;font-weight:500;padding:8px 18px;border-radius:999px;
+  border:1px solid var(--line);background:var(--panel);color:var(--fg);cursor:pointer;
+}
+.tabs button[aria-selected="true"]{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.hint{background:var(--accent-soft);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;font-size:14px;margin-bottom:12px}
+.hint b{color:var(--accent)}
+/* ---------- 工具列 ---------- */
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.toolbar .gap{flex:1}
+.btn{
+  font:inherit;font-size:14px;padding:7px 14px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--line);background:var(--panel);color:var(--fg);
+}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+.btn:active{transform:translateY(1px)}
+.scen{font-size:13px}
+.toolbar .lbl{font-size:13px;color:var(--muted)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chips button{
+  font:inherit;font-size:12.5px;padding:4px 10px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--line);background:var(--panel);color:var(--muted);
+}
+.chips button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);font-weight:700}
+/* ---------- 封包清單 ---------- */
+.plist{border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.plist .head,.prow{
+  display:grid;grid-template-columns:52px 76px 1.15fr 1.15fr 64px 56px 2.2fr;
+  gap:0 10px;align-items:center;font-size:13px;
+}
+.plist .head{background:var(--panel2);font-weight:700;padding:7px 10px;color:var(--muted);font-size:12px}
+.plist .body{max-height:300px;overflow-y:auto;font-family:var(--mono)}
+.prow{padding:5px 10px;border-top:1px solid var(--line);cursor:pointer}
+.prow:hover{background:var(--panel2)}
+.prow.selected{background:var(--sel)}
+.prow .num,.prow .t{color:var(--muted);font-variant-numeric:tabular-nums}
+.prow .info{font-family:var(--sans);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.ptag{font-family:var(--sans);font-size:11.5px;font-weight:700;padding:1px 7px;border-radius:5px;color:#fff;justify-self:start}
+.ptag.TCP{background:var(--c-tcp)} .ptag.UDP{background:var(--c-udp)}
+.ptag.DNS{background:var(--c-dns)} .ptag.HTTP{background:var(--c-http)}
+.ptag.ICMP{background:var(--c-icmp)} .ptag.ARP{background:var(--c-arp)}
+.ptag.TLS{background:var(--c-tls)}
+.empty{padding:28px 14px;text-align:center;color:var(--muted);font-size:14px}
+/* ---------- 詳細區 ---------- */
+.detail{display:grid;grid-template-columns:1.15fr 1fr;gap:14px;margin-top:14px}
+.detail>div{min-width:0}
+.plain{
+  grid-column:1/-1;background:var(--accent-soft);border-left:4px solid var(--accent);
+  border-radius:8px;padding:10px 14px;font-size:14.5px;
+}
+.plain b{color:var(--accent)}
+.card h3{margin:0 0 8px;font-size:14px;color:var(--muted);font-weight:700;letter-spacing:.08em}
+.layer{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:hidden}
+.layer>summary{
+  list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;
+  padding:8px 12px;background:var(--panel2);font-weight:700;font-size:13.5px;
+}
+.layer>summary::-webkit-details-marker{display:none}
+.layer>summary .dot{width:10px;height:10px;border-radius:3px;flex:none}
+.layer>summary .sum{color:var(--muted);font-weight:400;font-size:12.5px;margin-left:auto;text-align:right}
+.layer>summary .tri{color:var(--muted);font-size:11px;transition:transform .15s}
+.layer[open]>summary .tri{transform:rotate(90deg)}
+@media (prefers-reduced-motion: reduce){.layer>summary .tri{transition:none}}
+.frow{padding:6px 12px;border-top:1px solid var(--line);cursor:pointer;font-size:13.5px}
+.frow:hover{background:var(--panel2)}
+.frow.sel{background:var(--sel)}
+.frow .k{color:var(--muted)}
+.frow .v{font-family:var(--mono);font-size:13px}
+.frow .d{display:none;margin-top:4px;font-size:13px;color:var(--fg);background:var(--panel2);border-radius:6px;padding:6px 10px}
+.frow.sel .d{display:block}
+/* ---------- hex ---------- */
+.hexbox{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:10px 12px;overflow-x:auto}
+.hexline{font-family:var(--mono);font-size:12.5px;white-space:pre;line-height:1.75}
+.hexline .off{color:var(--muted)}
+.hx{padding:1px 1px;border-radius:3px}
+.hx.l0{background:var(--ly0)} .hx.l1{background:var(--ly1)}
+.hx.l2{background:var(--ly2)} .hx.l3{background:var(--ly3)}
+.hx.hl{background:var(--sel);outline:1.5px solid var(--warn);font-weight:600}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:8px 2px 0}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend i{width:11px;height:11px;border-radius:3px;display:inline-block}
+.note{font-size:12.5px;color:var(--muted);margin-top:8px}
+/* ---------- 打造器 ---------- */
+.builder{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.builder>div{min-width:0}
+.bgroup{border:1px solid var(--line);border-left-width:5px;border-radius:10px;padding:10px 14px 12px;margin-bottom:12px;background:var(--panel)}
+.bgroup h4{margin:0 0 2px;font-size:14px}
+.bgroup .gd{font-size:12.5px;color:var(--muted);margin-bottom:8px}
+.bgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}
+.fld{display:flex;flex-direction:column;gap:3px;min-width:0}
+.fld.wide{grid-column:1/-1}
+.fld label{font-size:12.5px;color:var(--muted)}
+.fld input,.fld select,.fld textarea{
+  font:inherit;font-size:14px;padding:6px 9px;border-radius:7px;
+  border:1px solid var(--line);background:var(--panel2);color:var(--fg);width:100%;
+}
+.fld input:focus,.fld select:focus,.fld textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
+.fld input[type=range]{padding:0}
+.flags{display:flex;gap:6px;flex-wrap:wrap}
+.flags label{
+  display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--fg);
+  border:1px solid var(--line);border-radius:7px;padding:5px 9px;cursor:pointer;background:var(--panel2);
+}
+.flags input{accent-color:var(--accent)}
+.explain{
+  border:1px solid var(--accent);background:var(--accent-soft);border-radius:10px;
+  padding:10px 14px;font-size:14px;min-height:66px;margin-bottom:12px;
+}
+.explain .ttl{font-weight:700;color:var(--accent);font-size:13px;margin-bottom:2px}
+.warns{margin-bottom:12px;display:flex;flex-direction:column;gap:6px}
+.warnrow{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:7px;padding:7px 12px;font-size:13.5px}
+.sizesum{font-size:13px;color:var(--muted);margin-top:8px;font-variant-numeric:tabular-nums}
+.sticky{position:sticky;top:calc(env(safe-area-inset-top,0px) + 10px)}
+@media (max-width:920px){
+  .detail,.builder{grid-template-columns:1fr}
+  .plist .head,.prow{grid-template-columns:40px 1fr 1fr 58px 1.6fr}
+  .plist .head .t,.prow .t,.plist .head .len,.prow .len{display:none}
+  .sticky{position:static}
+}
+@media (max-width:520px){ .bgrid{grid-template-columns:1fr} }
+h2.sec{font-size:16px;margin:0 0 10px}
+[hidden]{display:none!important}
+</style>
+
+<div class="wrap">
+<header class="top">
+  <h1>封包觀察站</h1>
+  <span class="sub">模擬流量・白話解說版 Wireshark —— 封包是模擬產生的，但每個 byte 都照真實協定格式排好</span>
+</header>
+
+<div class="tabs" role="tablist">
+  <button role="tab" id="tabBtn1" aria-selected="true" onclick="switchTab(1)">① 觀察封包</button>
+  <button role="tab" id="tabBtn2" aria-selected="false" onclick="switchTab(2)">② 自己打造一個封包</button>
+</div>
+
+<!-- ============ 分頁 1：觀察 ============ -->
+<section id="tab1" class="panel">
+  <div class="hint" id="hint1">
+    <b>怎麼玩：</b>按「▶ 開始擷取」會自動冒出模擬流量，或直接按情境按鈕（例如「開一個網頁」）看完整過程。
+    <b>點任何一列</b>就能把封包打開，逐層檢查裡面每個欄位；點欄位會告訴你它是幹嘛的，右邊還會亮出它對應的原始 bytes。
+  </div>
+
+  <div class="toolbar">
+    <button class="btn primary" id="startBtn" onclick="toggleCapture()">▶ 開始擷取</button>
+    <button class="btn" onclick="clearAll()">清空</button>
+    <span class="lbl">情境：</span>
+    <button class="btn scen" onclick="runScenario('web')">開一個網頁</button>
+    <button class="btn scen" onclick="runScenario('https')">開 HTTPS 網頁</button>
+    <button class="btn scen" onclick="runScenario('ping')">Ping 一下</button>
+    <button class="btn scen" onclick="runScenario('dns')">查 DNS</button>
+    <button class="btn scen" onclick="runScenario('arp')">ARP 找鄰居</button>
+    <span class="gap"></span>
+  </div>
+  <div class="toolbar">
+    <span class="lbl">只看：</span>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="plist">
+    <div class="head">
+      <span>編號</span><span class="t">時間(秒)</span><span>來源</span><span>目的地</span><span>協定</span><span class="len">大小</span><span>這個封包在說什麼</span>
+    </div>
+    <div class="body" id="plistBody">
+      <div class="empty" id="emptyMsg">還沒有封包。按上面的「▶ 開始擷取」或任一個情境按鈕吧！</div>
+    </div>
+  </div>
+
+  <div class="detail" id="detail" hidden>
+    <div class="plain" id="plainBox"></div>
+    <div class="card">
+      <h3>逐層打開這個封包（由外到內）</h3>
+      <div id="treeBox"></div>
+      <p class="note">封包像洋蔥：最外層 Ethernet 負責「同一個區網內」送達，IP 層負責「跨網路」送達，TCP/UDP 負責送到「對的程式」，最裡面才是真正的資料。</p>
+    </div>
+    <div class="card">
+      <h3>原始 bytes（網路線上真正跑的樣子）</h3>
+      <div class="hexbox" id="hexBox"></div>
+      <div class="legend" id="hexLegend"></div>
+      <p class="note">左欄是位置（16 進位），中間是每個 byte 的 16 進位值，右邊是把它當英文字母看的樣子（看不懂的顯示成「.」）。點左邊任何欄位，對應的 bytes 會亮起來。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 分頁 2：打造器 ============ -->
+<section id="tab2" class="panel" hidden>
+  <div class="hint">
+    <b>怎麼玩：</b>左邊的每個欄位就是封包表頭裡真實存在的格子，填什麼右邊的 bytes 就立刻變什麼。
+    <b>點進任何一個欄位</b>，上方會解釋它是幹嘛的，右邊也會亮出它住在哪幾個 bytes。檢查碼會自動幫你算好。
+  </div>
+  <div class="builder">
+    <div><!-- 表單 -->
+      <div class="bgroup" style="border-left-color:var(--c-arp)">
+        <h4>先選要做哪種封包</h4>
+        <div class="bgrid">
+          <div class="fld wide">
+            <label for="bProto">封包種類</label>
+            <select id="bProto" data-f="proto">
+              <option value="TCP">TCP —— 可靠傳輸（網頁、檔案多半用它）</option>
+              <option value="UDP">UDP —— 快遞直送不確認（遊戲、通話常用）</option>
+              <option value="ICMP">ICMP —— 網路的「喂，你在嗎？」（ping）</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="bgroup" style="border-left-color:#8b97a5">
+        <h4>Ethernet 層（第 2 層）</h4>
+        <div class="gd">管「同一個區域網路內」怎麼送：靠網卡的 MAC 位址認人。這兩格先幫你填好。</div>
+        <div class="bgrid">
+          <div class="fld"><label>來源 MAC（你的網卡）</label><input data-f="smac" value="3C:2E:F9:4A:1B:7D" readonly></div>
+          <div class="fld"><label>目的 MAC（路由器）</label><input data-f="dmac" value="74:85:C4:98:00:01" readonly></div>
+        </div>
+      </div>
+
+      <div class="bgroup" style="border-left-color:var(--c-tcp)">
+        <h4>IP 層（第 3 層）</h4>
+        <div class="gd">管「跨網路」怎麼送：寄件人與收件人的網路地址都寫在這。</div>
+        <div class="bgrid">
+          <div class="fld"><label for="bSrcIP">來源 IP（寄件人）</label><input id="bSrcIP" data-f="sip" value="192.168.1.101"></div>
+          <div class="fld"><label for="bDstIP">目的 IP（收件人）</label><input id="bDstIP" data-f="dip" value="93.184.216.34"></div>
+          <div class="fld wide"><label for="bTTL">TTL 剩餘壽命：<b id="ttlVal">64</b>（每過一台路由器 −1，歸零就丟掉）</label>
+            <input id="bTTL" data-f="ttl" type="range" min="1" max="255" value="64"></div>
+        </div>
+      </div>
+
+      <div class="bgroup" id="gTCP" style="border-left-color:var(--c-udp)">
+        <h4>TCP 層（第 4 層）</h4>
+        <div class="gd">管「送到對的程式、不漏不亂」：port 是程式的房間號，Seq/Ack 用來點名對帳。</div>
+        <div class="bgrid">
+          <div class="fld"><label for="bSport">來源 port（你這邊的房間號）</label><input id="bSport" data-f="sport" type="number" min="0" max="65535" value="51234"></div>
+          <div class="fld"><label for="bDport">目的 port（對方的房間號）</label><input id="bDport" data-f="dport" type="number" min="0" max="65535" value="80"></div>
+          <div class="fld"><label for="bSeq">Seq 序號</label><input id="bSeq" data-f="seq" type="number" min="0" value="0"></div>
+          <div class="fld"><label for="bAck">Ack 確認號</label><input id="bAck" data-f="ack" type="number" min="0" value="0"></div>
+          <div class="fld wide"><label>旗標 Flags（這個封包想幹嘛）</label>
+            <div class="flags" data-f="flags">
+              <label><input type="checkbox" value="SYN" checked>SYN 我想開線</label>
+              <label><input type="checkbox" value="ACK">ACK 收到了</label>
+              <label><input type="checkbox" value="FIN">FIN 我想收線</label>
+              <label><input type="checkbox" value="RST">RST 強制斷線</label>
+              <label><input type="checkbox" value="PSH">PSH 趕快往上送</label>
+              <label><input type="checkbox" value="URG">URG 緊急</label>
+            </div>
+          </div>
+          <div class="fld"><label for="bWin">Window 視窗（我一次還吃得下多少 bytes）</label><input id="bWin" data-f="win" type="number" min="0" max="65535" value="64240"></div>
+        </div>
+      </div>
+
+      <div class="bgroup" id="gUDP" style="border-left-color:var(--c-udp)" hidden>
+        <h4>UDP 層（第 4 層）</h4>
+        <div class="gd">只管「送到對的程式」，不開線也不確認，所以表頭超短（只有 8 bytes）。</div>
+        <div class="bgrid">
+          <div class="fld"><label for="uSport">來源 port</label><input id="uSport" data-f="usport" type="number" min="0" max="65535" value="51234"></div>
+          <div class="fld"><label for="uDport">目的 port</label><input id="uDport" data-f="udport" type="number" min="0" max="65535" value="53"></div>
+        </div>
+      </div>
+
+      <div class="bgroup" id="gICMP" style="border-left-color:var(--c-icmp)" hidden>
+        <h4>ICMP 層</h4>
+        <div class="gd">網路的喊話工具：「你在嗎？」「我在！」ping 就是它。</div>
+        <div class="bgrid">
+          <div class="fld"><label for="iType">類型</label>
+            <select id="iType" data-f="itype"><option value="8">8 — Echo Request（你在嗎？）</option><option value="0">0 — Echo Reply（我在！）</option></select></div>
+          <div class="fld"><label for="iSeq">序號（第幾次 ping）</label><input id="iSeq" data-f="iseq" type="number" min="0" max="65535" value="1"></div>
+        </div>
+      </div>
+
+      <div class="bgroup" style="border-left-color:var(--c-http)">
+        <h4>資料（真正要講的話）</h4>
+        <div class="gd">前面都是信封，這裡才是信的內容。打中文也行，會被編成 UTF-8 bytes。</div>
+        <div class="bgrid">
+          <div class="fld wide"><label for="bPayload">內容</label><textarea id="bPayload" data-f="payload" rows="2">Hello, network!</textarea></div>
+        </div>
+      </div>
+    </div>
+
+    <div><!-- 右欄 -->
+      <div class="sticky">
+        <div class="explain" id="bExplain"><div class="ttl">欄位解說</div>點左邊任何一個欄位，我會告訴你它是做什麼的，並在下面亮出它對應的 bytes。</div>
+        <div class="warns" id="bWarns"></div>
+        <div class="card">
+          <h3>你打造的封包（即時組出來的 bytes）</h3>
+          <div class="hexbox" id="bHexBox"></div>
+          <div class="legend" id="bLegend"></div>
+          <div class="sizesum" id="bSize"></div>
+          <p class="note">IP 和 TCP/UDP/ICMP 的檢查碼（checksum）都已自動算好——收到的人會重算一次，數字對不上就知道資料在路上壞掉了。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+</div>
+
+<script>
+"use strict";
+/* ================= 共用工具 ================= */
+const te = new TextEncoder();
+const hex2 = n => n.toString(16).padStart(2,"0");
+function ipB(s){ return s.split(".").map(x=>{const v=parseInt(x,10); return (v>=0&&v<=255)?v:0;}); }
+function macB(s){ return s.split(":").map(x=>parseInt(x,16)||0); }
+function u16(v){ v&=0xffff; return [v>>8, v&0xff]; }
+function u32(v){ v>>>=0; return [(v>>>24)&255,(v>>>16)&255,(v>>>8)&255,v&255]; }
+function csum(bytes){
+  let s=0;
+  for(let i=0;i<bytes.length;i+=2) s += (bytes[i]<<8) + (i+1<bytes.length?bytes[i+1]:0);
+  while(s>0xffff) s=(s&0xffff)+(s>>>16);
+  return (~s)&0xffff;
+}
+function validIP(s){ return /^(\d{1,3}\.){3}\d{1,3}$/.test(s) && s.split(".").every(x=>+x<=255); }
+
+/* 每層 builder 回傳 {name, color, sum, bytes:[], fields:[{k,v,d,off,len}]} */
+function ethLayer(smac,dmac,etype,etypeName){
+  const b=[...macB(dmac),...macB(smac),...u16(etype)];
+  return {name:"Ethernet（區網內的信封）",color:"var(--c-arp)",lcls:"l0",
+    sum:`${smac} → ${dmac}`,bytes:b,fields:[
+    {k:"目的 MAC",v:dmac,off:0,len:6,d:"收件網卡的「身分證字號」。MAC 是網卡出廠就燒好的編號，只在同一個區域網路內用來認人；要送到外面的世界時，這裡填的通常是路由器的 MAC——先交給它轉送。"},
+    {k:"來源 MAC",v:smac,off:6,len:6,d:"寄件網卡的身分證字號，也就是你電腦網卡的編號。"},
+    {k:"類型 EtherType",v:"0x"+etype.toString(16).padStart(4,"0")+"（"+etypeName+"）",off:12,len:2,d:"告訴對方：這個信封裡面裝的是哪種包裹。0x0800 代表 IPv4，0x0806 代表 ARP。"}
+  ]};
+}
+function ipLayer(o){ /* {src,dst,ttl,proto,protoName,payLen} */
+  const totalLen=20+o.payLen;
+  const b=[0x45,0x00,...u16(totalLen),...u16(o.ident??0x1a2b),0x40,0x00,o.ttl,o.proto,0,0,...ipB(o.src),...ipB(o.dst)];
+  const ck=csum(b); b[10]=ck>>8; b[11]=ck&0xff;
+  return {name:"IP（跨網路的信封）",color:"var(--c-tcp)",lcls:"l1",
+    sum:`${o.src} → ${o.dst}`,bytes:b,fields:[
+    {k:"版本 / 表頭長",v:"IPv4，表頭 20 bytes",off:0,len:1,d:"前 4 個 bit 寫版本（4 = IPv4），後 4 個 bit 寫表頭多長。"},
+    {k:"總長度",v:totalLen+" bytes",off:2,len:2,d:"從 IP 表頭開始算，整個封包一共有多大。"},
+    {k:"識別碼",v:"0x"+(o.ident??0x1a2b).toString(16),off:4,len:2,d:"封包的流水號。封包太大被切成好幾塊時，靠它知道哪些碎片是同一家人。"},
+    {k:"TTL 剩餘壽命",v:o.ttl,off:8,len:1,d:"每經過一台路由器就減 1，減到 0 封包就被丟掉——避免封包迷路後在網路上永遠繞圈圈。電腦通常從 64 或 128 出發。"},
+    {k:"上層協定",v:o.proto+"（"+o.protoName+"）",off:9,len:1,d:"信封裡面是哪種包裹：6 = TCP、17 = UDP、1 = ICMP。"},
+    {k:"表頭檢查碼",v:"0x"+ck.toString(16).padStart(4,"0"),off:10,len:2,d:"把表頭的數字全部加總算出的「驗算答案」。收到的人重算一次，對不上就表示資料在路上壞了。"},
+    {k:"來源 IP",v:o.src,off:12,len:4,d:"寄件人的網路地址。IP 像「住址」：搬到別的網路就會換，和出廠固定的 MAC 不一樣。"},
+    {k:"目的 IP",v:o.dst,off:16,len:4,d:"收件人的網路地址，一路上每台路由器都是看這格決定往哪送。"}
+  ]};
+}
+const FLAGBITS={FIN:1,SYN:2,RST:4,PSH:8,ACK:16,URG:32};
+function flagStr(set){ const on=Object.keys(FLAGBITS).filter(f=>set.has(f)); return on.length?on.join("+"):"（都沒設）"; }
+function tcpLayer(o){ /* {sport,dport,seq,ack,flags:Set,win,srcIP,dstIP,payload:Uint8Array} */
+  let fb=0; o.flags.forEach(f=>fb|=FLAGBITS[f]||0);
+  const b=[...u16(o.sport),...u16(o.dport),...u32(o.seq),...u32(o.ack),0x50,fb,...u16(o.win),0,0,0,0];
+  const seg=[...b,...o.payload];
+  const pseudo=[...ipB(o.srcIP),...ipB(o.dstIP),0,6,...u16(seg.length),...seg];
+  const ck=csum(pseudo); b[16]=ck>>8; b[17]=ck&0xff;
+  const fdesc={SYN:"SYN：我想跟你「開一條線」",ACK:"ACK：你剛剛傳的我收到了",FIN:"FIN：講完了，我想好好收線",RST:"RST：立刻斷線（出事了或拒絕連線）",PSH:"PSH：別攢著，趕快把資料交給上層程式",URG:"URG：有緊急資料"};
+  return {name:"TCP（可靠傳輸）",color:"var(--c-udp)",lcls:"l2",
+    sum:`port ${o.sport} → ${o.dport}　[${flagStr(o.flags)}]`,bytes:b,fields:[
+    {k:"來源 port",v:o.sport,off:0,len:2,d:"port 是「房間號」：IP 把信送到你家（整台電腦），port 決定交給哪個程式。寄出去時你這邊會隨機挑一個高號碼房間等回信。"},
+    {k:"目的 port",v:o.dport+portName(o.dport),off:2,len:2,d:"對方哪個程式收。常見約定：80 = 網頁(HTTP)、443 = 加密網頁(HTTPS)、53 = DNS。"},
+    {k:"Seq 序號",v:o.seq+"（相對值）",off:4,len:4,d:"「我這包資料是從第幾個 byte 開始講的」。有了它，就算封包亂序抵達也能排回正確順序，掉了也知道該補哪段。"},
+    {k:"Ack 確認號",v:o.ack+"（相對值）",off:8,len:4,d:"「你傳的我已經收到第幾個 byte 了，下次請從這裡繼續」。這就是 TCP 可靠的祕密：收多少、認多少。"},
+    {k:"旗標 Flags",v:flagStr(o.flags),off:13,len:1,d:"這個封包的「表情」。"+[...o.flags].map(f=>fdesc[f]).join("；")+(o.flags.size?"。":"")},
+    {k:"Window 視窗",v:o.win,off:14,len:2,d:"「我目前一口氣還吃得下多少 bytes」。對方會依這個數字控制傳輸速度，免得把你噎到——這叫流量控制。"},
+    {k:"檢查碼",v:"0x"+ck.toString(16).padStart(4,"0"),off:16,len:2,d:"TCP 自己的驗算答案，連資料內容一起算，壞掉就會被要求重傳。"}
+  ]};
+}
+function portName(p){ return ({80:"（HTTP 網頁）",443:"（HTTPS 加密網頁）",53:"（DNS）"})[p]||""; }
+function udpLayer(o){ /* {sport,dport,srcIP,dstIP,payload} */
+  const len=8+o.payload.length;
+  const b=[...u16(o.sport),...u16(o.dport),...u16(len),0,0];
+  const pseudo=[...ipB(o.srcIP),...ipB(o.dstIP),0,17,...u16(len),...b,...o.payload];
+  let ck=csum(pseudo); if(ck===0)ck=0xffff; b[6]=ck>>8; b[7]=ck&0xff;
+  return {name:"UDP（快遞直送，不確認）",color:"var(--c-udp)",lcls:"l2",
+    sum:`port ${o.sport} → ${o.dport}`,bytes:b,fields:[
+    {k:"來源 port",v:o.sport,off:0,len:2,d:"你這邊是哪個程式寄的（房間號）。"},
+    {k:"目的 port",v:o.dport+portName(o.dport),off:2,len:2,d:"對方哪個程式收。53 就是 DNS 的專用房間。"},
+    {k:"長度",v:len+" bytes",off:4,len:2,d:"UDP 表頭加上資料一共多長。"},
+    {k:"檢查碼",v:"0x"+((b[6]<<8)|b[7]).toString(16).padStart(4,"0"),off:6,len:2,d:"驗算答案。UDP 發現資料壞了就直接丟掉、不會要求重傳——快，但不保證送達，所以適合遊戲、語音這種「舊的不用補」的場合。"}
+  ]};
+}
+function icmpLayer(o){ /* {type,seq,payload} */
+  const b=[o.type,0,0,0,0x42,0x42,...u16(o.seq),...o.payload];
+  const ck=csum(b); b[2]=ck>>8; b[3]=ck&0xff;
+  return {name:"ICMP（網路喊話工具）",color:"var(--c-icmp)",lcls:"l2",
+    sum:o.type===8?"Echo Request（你在嗎？）":"Echo Reply（我在！）",bytes:b,fields:[
+    {k:"類型",v:o.type+(o.type===8?"（Echo Request 你在嗎？）":"（Echo Reply 我在！）"),off:0,len:1,d:"8 = 問「你在嗎」，0 = 回「我在」。你平常打的 ping 指令就是送這個。"},
+    {k:"檢查碼",v:"0x"+ck.toString(16).padStart(4,"0"),off:2,len:2,d:"驗算答案，壞掉就作廢。"},
+    {k:"識別碼",v:"0x4242",off:4,len:2,d:"分辨是哪個 ping 程式發的，回音才知道要還給誰。"},
+    {k:"序號",v:o.seq,off:6,len:2,d:"第幾次 ping。連續 ping 時靠它配對問與答、看有沒有掉包。"},
+    {k:"附帶資料",v:o.payload.length+" bytes",off:8,len:o.payload.length,d:"隨便塞的測試資料，對方會原封不動抄回來，證明路是通的。"}
+  ]};
+}
+function rawLayer(name,color,bytes,fields,sum){ return {name,color,lcls:"l3",sum,bytes,fields}; }
+
+/* ---- DNS ---- */
+function dnsName(domain){ const out=[]; domain.split(".").forEach(l=>{out.push(l.length); for(const c of l)out.push(c.charCodeAt(0));}); out.push(0); return out; }
+function dnsQuery(domain,id){
+  const qn=dnsName(domain);
+  const b=[...u16(id),0x01,0x00,...u16(1),...u16(0),...u16(0),...u16(0),...qn,...u16(1),...u16(1)];
+  return rawLayer("DNS 查詢（網路的查號台）","var(--c-dns)",b,[
+    {k:"查詢編號",v:"0x"+id.toString(16),off:0,len:2,d:"這次查詢的號碼牌。回答會帶同一個號碼，才知道是在回哪一題。"},
+    {k:"旗標",v:"0x0100（這是問題，請幫我遞迴查到底）",off:2,len:2,d:"標明這是「提問」，並拜託 DNS 伺服器：就算你不知道，也請幫我一路問到知道為止。"},
+    {k:"問題",v:domain+"，查 A 紀錄",off:12,len:qn.length+4,d:"問題本體：「"+domain+" 的 IPv4 地址是多少？」注意網域在封包裡的寫法：每段文字前面放一個長度數字，例如 3www7example3com0。"}
+  ],"問："+domain+" 的 IP？");
+}
+function dnsResponse(domain,ip,id){
+  const qn=dnsName(domain);
+  const ans=[0xc0,0x0c,...u16(1),...u16(1),...u32(300),...u16(4),...ipB(ip)];
+  const b=[...u16(id),0x81,0x80,...u16(1),...u16(1),...u16(0),...u16(0),...qn,...u16(1),...u16(1),...ans];
+  const aOff=12+qn.length+4;
+  return rawLayer("DNS 回答","var(--c-dns)",b,[
+    {k:"查詢編號",v:"0x"+id.toString(16),off:0,len:2,d:"和剛剛問題上的號碼牌一樣，表示「我在回你那一題」。"},
+    {k:"旗標",v:"0x8180（這是回答）",off:2,len:2,d:"標明這是「回答」而且查詢成功。"},
+    {k:"原問題",v:domain,off:12,len:qn.length+4,d:"把你的問題抄一遍，方便你核對。"},
+    {k:"答案",v:domain+" = "+ip+"（可快取 300 秒）",off:aOff,len:ans.length,d:"重點在這：告訴你 "+domain+" 的 IP 是 "+ip+"。「300 秒」是保存期限——這段時間內你可以直接用，不必再問一次。"}
+  ],"答："+ip);
+}
+function httpLayer(text,isReq){
+  const b=[...te.encode(text)];
+  const lines=text.split("\r\n");
+  let off=0; const fields=[];
+  lines.forEach((ln)=>{
+    const len=te.encode(ln).length+2;
+    if(ln==="" ){ off+=2; return; }
+    let d;
+    if(isReq&&ln.startsWith("GET")) d="請求行：動作 + 要哪個檔案 + 用哪版 HTTP。「GET /」就是「把首頁給我」。";
+    else if(!isReq&&ln.startsWith("HTTP")) d="狀態行：200 OK = 成功。404 就是大家熟的「找不到」。";
+    else if(ln.startsWith("Host")) d="我要找的是哪個網站。同一台伺服器常住很多網站，要靠這行分辨。";
+    else if(ln.startsWith("Content-Type")) d="內容是什麼格式：text/html 就是網頁。";
+    else if(ln.startsWith("Content-Length")) d="後面的內容共幾個 bytes，瀏覽器才知道收到哪算收完。";
+    else if(ln.startsWith("<")) { d="網頁本體！瀏覽器把這段 HTML 畫出來，就是你看到的畫面。"; }
+    else d="HTTP 標頭：一行一個「鍵: 值」的附註。";
+    const thisLen = ln.startsWith("<") ? b.length-off : len;
+    fields.push({k:ln.startsWith("<")?"網頁內容":ln.split(/[ :]/)[0],v:ln.length>46?ln.slice(0,46)+"…":ln,off,len:thisLen,d});
+    off+=len;
+  });
+  return rawLayer(isReq?"HTTP 請求（人話寫的！）":"HTTP 回應（人話寫的！）","var(--c-http)",b,fields,
+    isReq?"GET /":"200 OK");
+}
+function tlsLayer(type,len0,label,desc){
+  const body=[]; for(let i=0;i<len0;i++) body.push((Math.random()*256)|0);
+  const b=[type,0x03,0x03,...u16(len0),...body];
+  return rawLayer("TLS（加密層）","var(--c-tls)",b,[
+    {k:"內容類型",v:type+(type===22?"（22 = 握手訊息）":"（23 = 加密資料）"),off:0,len:1,d:"22 表示雙方正在「交換鑰匙」的握手階段；23 表示後面是加密完成的資料。"},
+    {k:"版本",v:"TLS 1.2 相容標示",off:1,len:2,d:"為了相容舊設備，這格固定寫 0x0303，實際版本在握手內容裡談。"},
+    {k:"長度",v:len0+" bytes",off:3,len:2,d:"後面跟著多少 bytes。"},
+    {k:label,v:len0+" bytes 的亂碼",off:5,len:len0,d:desc}
+  ],label);
+}
+function arpLayer(op,sMac,sIP,tMac,tIP){
+  const b=[...u16(1),...u16(0x0800),6,4,...u16(op),...macB(sMac),...ipB(sIP),...macB(tMac),...ipB(tIP)];
+  return rawLayer("ARP（區網內的點名）","var(--c-arp)",b,[
+    {k:"操作",v:op===1?"1（請求：誰是這個 IP？）":"2（回答：是我！）",off:6,len:2,d:"1 = 廣播問「這個 IP 是哪張網卡？」，2 = 本人回答。IP 是住址、MAC 是人名，ARP 就是把住址對到人名的點名程序。"},
+    {k:"寄件人 MAC / IP",v:sMac+" / "+sIP,off:8,len:10,d:"發話者自報家門，順便讓大家把這組對應記下來。"},
+    {k:"收件人 MAC / IP",v:(op===1?"（還不知道）":tMac)+" / "+tIP,off:18,len:10,d:op===1?"就是在問這格：目標 MAC 先填 0，等本人來填。":"回答時把自己的 MAC 填進來。"}
+  ],op===1?"誰是 "+tIP+"？":tIP+" 在這！");
+}
+
+/* ================= 封包組裝與渲染 ================= */
+function assemble(layers){
+  let total=0; layers.forEach(l=>total+=l.bytes.length);
+  const buf=new Uint8Array(total); let pos=0;
+  layers.forEach(l=>{ buf.set(l.bytes,pos); l.start=pos; l.fields.forEach(f=>f.abs=pos+f.off); pos+=l.bytes.length; });
+  return buf;
+}
+function renderHex(container,buf,layers,extraCls){
+  const ranges=layers.map(l=>({s:l.start,e:l.start+l.bytes.length,c:l.lcls}));
+  let html="";
+  for(let r=0;r<buf.length;r+=16){
+    let hx="",asc="";
+    for(let i=r;i<r+16;i++){
+      if(i<buf.length){
+        const cl=(ranges.find(x=>i>=x.s&&i<x.e)||{}).c||"";
+        hx+=`<span class="hx ${cl}" data-i="${i}">${hex2(buf[i])}</span>`+(i%16===7?"  ":" ");
+        const ch=buf[i];
+        asc+=(ch>=32&&ch<127)?({38:"&amp;",60:"&lt;",62:"&gt;"}[ch]||String.fromCharCode(ch)):".";
+      } else { hx+="   "+(i%16===7?" ":""); }
+    }
+    html+=`<div class="hexline"><span class="off">${r.toString(16).padStart(4,"0")}</span>  ${hx} <span class="off">${asc}</span></div>`;
+  }
+  container.innerHTML=html;
+}
+function renderLegend(el,layers){
+  const names={l0:"Ethernet",l1:"IP",l2:"傳輸層",l3:"資料"};
+  const seen=new Set();
+  el.innerHTML=layers.filter(l=>!seen.has(l.lcls)&&seen.add(l.lcls))
+    .map(l=>`<span><i style="background:var(--${({l0:"ly0",l1:"ly1",l2:"ly2",l3:"ly3"})[l.lcls]})"></i>${names[l.lcls]}（${l.name.split("（")[0]}…）</span>`).join("");
+}
+function hl(container,abs,len){
+  container.querySelectorAll(".hx.hl").forEach(e=>e.classList.remove("hl"));
+  for(let i=abs;i<abs+len;i++){
+    const el=container.querySelector(`.hx[data-i="${i}"]`); if(el)el.classList.add("hl");
+  }
+  const first=container.querySelector(".hx.hl");
+  if(first) first.scrollIntoView({block:"nearest",inline:"nearest"});
+}
+
+/* ================= 分頁 1：模擬擷取 ================= */
+const ME={ip:"192.168.1.101",mac:"3C:2E:F9:4A:1B:7D",name:"我的電腦"};
+const GW={ip:"192.168.1.1",mac:"74:85:C4:98:00:01",name:"路由器"};
+const packets=new Map(); let pktNo=0, capStart=null, running=false, autoTimer=null, selectedNo=null;
+const listBody=document.getElementById("plistBody");
+let filter="全部";
+
+function nowT(){ if(capStart===null) capStart=performance.now(); return (performance.now()-capStart)/1000; }
+function mkPacket(o){ /* {proto, layers, info, plain, srcName, dstName} */
+  const buf=assemble(o.layers);
+  return {...o,buf,len:buf.length,no:++pktNo,t:nowT()};
+}
+function addPacket(p){
+  packets.set(p.no,p);
+  document.getElementById("emptyMsg").hidden=true;
+  const row=document.createElement("div");
+  row.className="prow"; row.dataset.no=p.no; row.dataset.proto=p.proto;
+  row.innerHTML=`<span class="num">${p.no}</span><span class="t">${p.t.toFixed(3)}</span>
+    <span>${p.srcName}</span><span>${p.dstName}</span>
+    <span class="ptag ${p.proto}">${p.proto}</span><span class="len num">${p.len}</span>
+    <span class="info">${p.info}</span>`;
+  row.onclick=()=>selectPacket(p.no);
+  const follow = listBody.scrollTop+listBody.clientHeight >= listBody.scrollHeight-48;
+  listBody.appendChild(row);
+  if(filter!=="全部"&&p.proto!==filter) row.style.display="none";
+  while(packets.size>400){ const oldest=packets.keys().next().value; packets.delete(oldest);
+    const r=listBody.querySelector(`.prow[data-no="${oldest}"]`); if(r)r.remove(); }
+  if(follow) listBody.scrollTop=listBody.scrollHeight;
+}
+function selectPacket(no){
+  const p=packets.get(no); if(!p)return;
+  selectedNo=no;
+  listBody.querySelectorAll(".prow.selected").forEach(r=>r.classList.remove("selected"));
+  const row=listBody.querySelector(`.prow[data-no="${no}"]`); if(row)row.classList.add("selected");
+  document.getElementById("detail").hidden=false;
+  document.getElementById("plainBox").innerHTML=`<b>白話：</b>${p.plain}`;
+  const tree=document.getElementById("treeBox");
+  tree.innerHTML=p.layers.map((l,li)=>`
+    <details class="layer" open>
+      <summary><span class="tri">▶</span><span class="dot" style="background:${l.color}"></span>
+        ${l.name}<span class="sum">${l.sum}　·　${l.bytes.length} bytes</span></summary>
+      ${l.fields.map((f,fi)=>`
+        <div class="frow" data-l="${li}" data-f="${fi}">
+          <span class="k">${f.k}：</span><span class="v">${f.v}</span>
+          <div class="d">${f.d}</div>
+        </div>`).join("")}
+    </details>`).join("");
+  const hexBox=document.getElementById("hexBox");
+  renderHex(hexBox,p.buf,p.layers);
+  renderLegend(document.getElementById("hexLegend"),p.layers);
+  tree.querySelectorAll(".frow").forEach(r=>{
+    r.onclick=()=>{
+      tree.querySelectorAll(".frow.sel").forEach(x=>x.classList.remove("sel"));
+      r.classList.add("sel");
+      const f=p.layers[+r.dataset.l].fields[+r.dataset.f];
+      hl(hexBox,f.abs,f.len);
+    };
+  });
+  if(window.innerWidth>920) document.getElementById("detail").scrollIntoView({block:"nearest"});
+}
+
+/* ---- 封包工廠 ---- */
+function ethIpTcp(from,to,toName,fromName,tcpOpts,payloadLayer,info,plain){
+  const payload=payloadLayer?Uint8Array.from(payloadLayer.bytes):new Uint8Array(0);
+  const tcp=tcpLayer({...tcpOpts,srcIP:from.ip,dstIP:to.ip,payload});
+  const ip=ipLayer({src:from.ip,dst:to.ip,ttl:from===ME?64:(52+((Math.random()*8)|0)),proto:6,protoName:"TCP",payLen:20+payload.length,ident:(Math.random()*0xffff)|0});
+  const eth=ethLayer(from===ME?ME.mac:GW.mac, from===ME?GW.mac:ME.mac, 0x0800,"IPv4");
+  const layers=[eth,ip,tcp]; if(payloadLayer)layers.push(payloadLayer);
+  return mkPacket({proto:payloadLayer?(payloadLayer.name.startsWith("HTTP")?"HTTP":payloadLayer.name.startsWith("TLS")?"TLS":"TCP"):"TCP",
+    layers,info,plain,srcName:fromName,dstName:toName});
+}
+function ethIpUdp(from,to,toName,fromName,sport,dport,payloadLayer,proto,info,plain){
+  const payload=Uint8Array.from(payloadLayer.bytes);
+  const udp=udpLayer({sport,dport,srcIP:from.ip,dstIP:to.ip,payload});
+  const ip=ipLayer({src:from.ip,dst:to.ip,ttl:from===ME?64:57,proto:17,protoName:"UDP",payLen:8+payload.length,ident:(Math.random()*0xffff)|0});
+  const eth=ethLayer(from===ME?ME.mac:GW.mac, from===ME?GW.mac:ME.mac,0x0800,"IPv4");
+  return mkPacket({proto,layers:[eth,ip,udp,payloadLayer],info,plain,srcName:fromName,dstName:toName});
+}
+function burst(items){ /* [[delayMs, fn], ...] */
+  items.forEach(([d,fn])=>setTimeout(()=>addPacket(fn()),d));
+}
+const SITES=[["www.example.com","93.184.216.34"],["shop.ocean.tw","203.145.8.21"],["news.daily.net","151.101.65.67"]];
+function scenWeb(httpsMode){
+  const [host,hip]=SITES[(Math.random()*SITES.length)|0];
+  const S={ip:hip,name:host};
+  const sport=49152+((Math.random()*16000)|0);
+  const dport=httpsMode?443:80;
+  const dnsId=(Math.random()*0xffff)|0;
+  const F=s=>new Set(s.split(","));
+  const items=[
+    [0,()=>ethIpUdp(ME,{ip:"8.8.8.8"},"8.8.8.8 (DNS)",ME.name,sport,53,dnsQuery(host,dnsId),"DNS",
+      `我問 DNS：${host} 的 IP 是多少？`,
+      `要連 <b>${host}</b>，但網路只認 IP 不認名字，所以第一步先問 DNS 查號台把名字換成 IP。`)],
+    [240,()=>ethIpUdp({ip:"8.8.8.8"},ME,ME.name,"8.8.8.8 (DNS)",53,sport,dnsResponse(host,hip,dnsId),"DNS",
+      `DNS 回答：${host} = ${hip}`,
+      `查號台回覆了：<b>${host}</b> 的地址是 <b>${hip}</b>，而且可以先記 300 秒，之後不用再問。`)],
+    [420,()=>ethIpTcp(ME,S,host,ME.name,{sport,dport,seq:0,ack:0,flags:F("SYN"),win:64240},null,
+      `我 → 伺服器：想建立連線（SYN）`,
+      `TCP 三次握手第 1 步。我先敲門：「嗨，我想跟你開一條可靠的線」（只設 SYN 旗標）。`)],
+    [640,()=>ethIpTcp(S,ME,ME.name,host,{sport:dport,dport:sport,seq:0,ack:1,flags:F("SYN,ACK"),win:65160},null,
+      `伺服器 → 我：好啊，我也準備好了（SYN-ACK）`,
+      `握手第 2 步。對方回：「收到你的邀請（ACK），我這邊也開好了（SYN）」。`)],
+    [800,()=>ethIpTcp(ME,S,host,ME.name,{sport,dport,seq:1,ack:1,flags:F("ACK"),win:64240},null,
+      `我 → 伺服器：收到！連線建立完成（ACK）`,
+      `握手第 3 步，也是最後一步。雙方都確認過彼此在線、序號也對齊了，<b>連線正式建立</b>，可以開始傳資料。`)],
+  ];
+  let t=1050;
+  if(!httpsMode){
+    const req=`GET / HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: MiniBrowser/1.0\r\n\r\n`;
+    const reqLayer=httpLayer(req,true);
+    const body=`<html><body><h1>Hello!</h1></body></html>`;
+    const resp=`HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${te.encode(body).length}\r\n\r\n${body}`;
+    const reqLen=te.encode(req).length;
+    items.push([t,()=>ethIpTcp(ME,S,host,ME.name,{sport,dport,seq:1,ack:1,flags:F("ACK,PSH"),win:64240},reqLayer,
+      `我向伺服器要網頁：GET /`,
+      `線開好了，正式開口要東西：「把首頁給我」。注意看——<b>HTTP 是用人話（英文字）寫的</b>，右邊 bytes 的 ASCII 欄直接讀得懂！`)]);
+    items.push([t+300,()=>ethIpTcp(S,ME,ME.name,host,{sport:dport,dport:sport,seq:1,ack:1+reqLen,flags:F("ACK,PSH"),win:65160},httpLayer(resp,false),
+      `伺服器回傳網頁內容：200 OK`,
+      `伺服器說「200 OK = 成功」並附上網頁本體。瀏覽器把這段 HTML 畫出來，你就看到網頁了。也注意 <b>Ack 確認號</b>剛好等於我剛剛送出的資料量 +1——它在說「你那包我全收到了」。`)]);
+  } else {
+    items.push([t,()=>ethIpTcp(ME,S,host,ME.name,{sport,dport,seq:1,ack:1,flags:F("ACK,PSH"),win:64240},
+      tlsLayer(22,96,"ClientHello 內容","我方開出的「加密菜單」：支援哪些加密法、附上亂數，讓雙方協商出一把共同鑰匙。"),
+      `我 → 伺服器：開始 TLS 握手（ClientHello）`,
+      `HTTPS 比 HTTP 多一步：傳資料前先<b>交換鑰匙</b>。這包是我開出的加密菜單。`)]);
+    items.push([t+300,()=>ethIpTcp(S,ME,ME.name,host,{sport:dport,dport:sport,seq:1,ack:102,flags:F("ACK,PSH"),win:65160},
+      tlsLayer(22,120,"ServerHello + 憑證","伺服器選定加密法，並出示「身分證」（憑證）證明它真的是這個網站，不是冒牌貨。"),
+      `伺服器 → 我：ServerHello + 出示憑證`,
+      `伺服器選好加密方式，並出示<b>憑證</b>自證身分——這就是瀏覽器網址列那把小鎖的由來。`)]);
+    items.push([t+650,()=>ethIpTcp(ME,S,host,ME.name,{sport,dport,seq:102,ack:126,flags:F("ACK,PSH"),win:64240},
+      tlsLayer(23,88,"加密後的資料","鑰匙換好了，之後所有內容（包括網址路徑、網頁本身）都變成這樣的亂碼。中途偷看的人只能看到「你連了這台伺服器」，看不到內容。"),
+      `我 → 伺服器：加密後的請求（看不到內容）`,
+      `鑰匙交換完成，真正的請求出發——但已經<b>加密成亂碼</b>。這就是為什麼用 Wireshark 看 HTTPS 流量只能看到一堆看不懂的 Application Data。`)]);
+  }
+  burst(items);
+}
+function scenPing(){
+  const pay=te.encode("abcdefghijklmnopqrstuvwxyz012345");
+  const id=(Math.random()*0xffff)|0; const seqBase=1;
+  const items=[];
+  for(let i=0;i<2;i++){
+    const seq=seqBase+i;
+    items.push([i*1000,()=>{
+      const ic=icmpLayer({type:8,seq,payload:[...pay]});
+      const ip=ipLayer({src:ME.ip,dst:"8.8.8.8",ttl:64,proto:1,protoName:"ICMP",payLen:ic.bytes.length,ident:id+i});
+      const eth=ethLayer(ME.mac,GW.mac,0x0800,"IPv4");
+      return mkPacket({proto:"ICMP",layers:[eth,ip,ic],srcName:ME.name,dstName:"8.8.8.8",
+        info:`Ping 第 ${seq} 次：你在嗎？（Echo Request）`,
+        plain:`我對 8.8.8.8 喊話：「你在嗎？」順便附了 32 bytes 測試資料請它原樣抄回來。`});
+    }]);
+    items.push([i*1000+230,()=>{
+      const ic=icmpLayer({type:0,seq,payload:[...pay]});
+      const ip=ipLayer({src:"8.8.8.8",dst:ME.ip,ttl:115,proto:1,protoName:"ICMP",payLen:ic.bytes.length,ident:(id+i+7)&0xffff});
+      const eth=ethLayer(GW.mac,ME.mac,0x0800,"IPv4");
+      return mkPacket({proto:"ICMP",layers:[eth,ip,ic],srcName:"8.8.8.8",dstName:ME.name,
+        info:`回音第 ${seq} 次：我在！（Echo Reply）`,
+        plain:`對方回「我在！」並把測試資料原樣抄回。一來一回的時間差就是 ping 顯示的<b>延遲（ms）</b>。注意它的 TTL 是 115：它從 128 出發，代表路上大約經過了 13 台路由器。`});
+    }]);
+  }
+  burst(items);
+}
+function scenDNS(){
+  const [host,hip]=SITES[(Math.random()*SITES.length)|0];
+  const sport=49152+((Math.random()*16000)|0); const id=(Math.random()*0xffff)|0;
+  burst([
+    [0,()=>ethIpUdp(ME,{ip:"8.8.8.8"},"8.8.8.8 (DNS)",ME.name,sport,53,dnsQuery(host,id),"DNS",
+      `我問 DNS：${host} 的 IP？`,
+      `DNS 就是網路的查號台：把人記得住的名字換成機器用的 IP。它用 <b>UDP</b> 送——問一句答一句，不值得開一條線。`)],
+    [230,()=>ethIpUdp({ip:"8.8.8.8"},ME,ME.name,"8.8.8.8 (DNS)",53,sport,dnsResponse(host,hip,id),"DNS",
+      `DNS 回答：${host} = ${hip}`,
+      `答案來了。打開「DNS 回答」那層看<b>答案</b>欄位——還附保存期限 300 秒，期限內不用重問。`)]
+  ]);
+}
+function scenARP(){
+  burst([
+    [0,()=>{
+      const arp=arpLayer(1,ME.mac,ME.ip,"00:00:00:00:00:00",GW.ip);
+      const eth=ethLayer(ME.mac,"FF:FF:FF:FF:FF:FF",0x0806,"ARP");
+      return mkPacket({proto:"ARP",layers:[eth,arp],srcName:ME.name,dstName:"大家（廣播）",
+        info:`廣播問：誰是 ${GW.ip}？請告訴我你的 MAC`,
+        plain:`我知道路由器的 IP 是 ${GW.ip}，但區網內送信要靠 MAC。於是<b>對全區網廣播</b>（目的 MAC 全是 FF）：「這個 IP 是哪張網卡？」`});
+    }],
+    [180,()=>{
+      const arp=arpLayer(2,GW.mac,GW.ip,ME.mac,ME.ip);
+      const eth=ethLayer(GW.mac,ME.mac,0x0806,"ARP");
+      return mkPacket({proto:"ARP",layers:[eth,arp],srcName:"路由器",dstName:ME.name,
+        info:`${GW.ip} 回答：我在這，MAC 是 ${GW.mac}`,
+        plain:`路由器本人回答了。我的電腦會把「${GW.ip} = ${GW.mac}」記進小抄（ARP 表），之後直接寄、不用再問。`});
+    }]
+  ]);
+}
+function runScenario(s){
+  if(capStart===null) capStart=performance.now();
+  ({web:()=>scenWeb(false),https:()=>scenWeb(true),ping:scenPing,dns:scenDNS,arp:scenARP})[s]();
+}
+function toggleCapture(){
+  running=!running;
+  const b=document.getElementById("startBtn");
+  b.textContent=running?"⏸ 暫停擷取":"▶ 開始擷取";
+  b.classList.toggle("primary",!running);
+  if(running){
+    if(capStart===null) capStart=performance.now();
+    const kick=()=>{ if(!running)return;
+      const pool=["web","https","ping","dns","arp","web","dns"];
+      runScenario(pool[(Math.random()*pool.length)|0]);
+      autoTimer=setTimeout(kick,2200+Math.random()*2500);
+    };
+    kick();
+  } else clearTimeout(autoTimer);
+}
+function clearAll(){
+  packets.clear(); pktNo=0; capStart=null; selectedNo=null;
+  listBody.querySelectorAll(".prow").forEach(r=>r.remove());
+  document.getElementById("emptyMsg").hidden=false;
+  document.getElementById("detail").hidden=true;
+}
+/* 篩選 chips */
+(function(){
+  const protos=["全部","TCP","HTTP","TLS","UDP","DNS","ICMP","ARP"];
+  const box=document.getElementById("chips");
+  protos.forEach(p=>{
+    const b=document.createElement("button");
+    b.textContent=p; b.setAttribute("aria-pressed",p==="全部");
+    b.onclick=()=>{ filter=p;
+      box.querySelectorAll("button").forEach(x=>x.setAttribute("aria-pressed",x.textContent===p));
+      listBody.querySelectorAll(".prow").forEach(r=>{
+        r.style.display=(p==="全部"||r.dataset.proto===p)?"":"none";
+      });
+    };
+    box.appendChild(b);
+  });
+})();
+
+/* ================= 分頁 2：打造器 ================= */
+const bDescs={
+  proto:["封包種類","先決定第 4 層用誰：TCP 可靠但要先握手；UDP 直接丟出去，快但可能掉；ICMP 不載資料，專門用來探測網路通不通。"],
+  smac:["來源 MAC","你網卡出廠就燒好的編號，區網內靠它認人。這裡幫你固定住。"],
+  dmac:["目的 MAC","要送出網路時，第一站先交給路由器，所以這裡填路由器的 MAC（靠 ARP 問到的）。"],
+  sip:["來源 IP","寄件人地址。對方要回信就是回到這裡——所以偽造來源 IP 的封包收不到回音（但攻擊者有時故意這麼做）。"],
+  dip:["目的 IP","收件人地址，一路上每台路由器都看這格決定轉送方向。"],
+  ttl:["TTL 剩餘壽命","每經過一台路由器減 1，歸零就被丟掉並回報錯誤。traceroute 就是故意把 TTL 從 1 開始設，逼沿路每台路由器出來報到。"],
+  sport:["來源 port","你這邊程式的房間號。主動連線時通常隨機挑一個 49152 以上的高號碼。"],
+  dport:["目的 port","對方程式的房間號。約定俗成：80 = 網頁、443 = 加密網頁、53 = DNS、22 = SSH。"],
+  seq:["Seq 序號","我這包資料從第幾個 byte 開始。讓對方能排序、能發現漏了哪段。"],
+  ack:["Ack 確認號","「你傳的我收到第幾個 byte 了」。設了 ACK 旗標這格才有意義。"],
+  flags:["旗標 Flags","封包的表情：SYN 開線、ACK 確認、FIN 收線、RST 砸線。試試同時勾 SYN 和 FIN——下面會警告你，因為那是矛盾的（也是駭客掃描的招式）。"],
+  win:["Window 視窗","我一口氣還吃得下多少 bytes。數字越小代表我快滿了，請對方慢點傳——流量控制就靠它。"],
+  usport:["來源 port","你這邊程式的房間號。"],
+  udport:["目的 port","對方程式的房間號，53 是 DNS 專用。"],
+  itype:["ICMP 類型","8 = 問「你在嗎」（ping 送出的），0 = 回「我在」。"],
+  iseq:["序號","第幾次 ping，問與答靠它配對。"],
+  payload:["資料內容","信封寫完了，這是信本身。注意看右邊 ASCII 欄：英文直接看得到原文——這就是為什麼<b>沒加密的內容在網路上等於明信片</b>，沿路都讀得到。"]
+};
+let bFields={}; let bBuf=null; let bLayers=null;
+const bHexBox=document.getElementById("bHexBox");
+function readFlags(){
+  const s=new Set();
+  document.querySelectorAll('[data-f="flags"] input:checked').forEach(c=>s.add(c.value));
+  return s;
+}
+function num(id,def){ const v=parseInt(document.getElementById(id).value,10); return isNaN(v)?def:v; }
+function rebuild(){
+  const proto=document.getElementById("bProto").value;
+  document.getElementById("gTCP").hidden=proto!=="TCP";
+  document.getElementById("gUDP").hidden=proto!=="UDP";
+  document.getElementById("gICMP").hidden=proto!=="ICMP";
+  let sip=document.getElementById("bSrcIP").value.trim();
+  let dip=document.getElementById("bDstIP").value.trim();
+  const sipOK=validIP(sip), dipOK=validIP(dip);
+  const ttl=num("bTTL",64);
+  document.getElementById("ttlVal").textContent=ttl;
+  const payload=te.encode(document.getElementById("bPayload").value);
+  const warns=[];
+  if(!sipOK){warns.push("來源 IP 格式不對（要像 192.168.1.101 這樣四段 0–255）。先用預設值組給你看。"); sip="192.168.1.101";}
+  if(!dipOK){warns.push("目的 IP 格式不對。先用預設值組給你看。"); dip="93.184.216.34";}
+  let l4, fmap={};
+  if(proto==="TCP"){
+    const flags=readFlags();
+    l4=tcpLayer({sport:num("bSport",0)&0xffff,dport:num("bDport",0)&0xffff,seq:num("bSeq",0),ack:num("bAck",0),flags,win:num("bWin",0)&0xffff,srcIP:sip,dstIP:dip,payload});
+    fmap={sport:0,dport:1,seq:2,ack:3,flags:4,win:5};
+    if(flags.has("SYN")&&flags.has("FIN")) warns.push("⚠ SYN（想開線）和 FIN（想關線）同時設是矛盾的，正常流量不會這樣——這其實是駭客用來探測防火牆的掃描手法之一。");
+    if(flags.size===0) warns.push("⚠ 一個旗標都沒設（NULL packet）也是異常封包，同樣常見於掃描。");
+    if(!flags.has("ACK")&&num("bAck",0)>0) warns.push("提示：填了 Ack 數字但沒勾 ACK 旗標，對方會忽略這個數字。");
+  } else if(proto==="UDP"){
+    l4=udpLayer({sport:num("uSport",0)&0xffff,dport:num("uDport",0)&0xffff,srcIP:sip,dstIP:dip,payload});
+    fmap={usport:0,udport:1};
+  } else {
+    l4=icmpLayer({type:+document.getElementById("iType").value,seq:num("iSeq",0)&0xffff,payload:[...payload]});
+    fmap={itype:0,iseq:3};
+  }
+  if(ttl<=3) warns.push("提示：TTL 只有 "+ttl+"，大概走不出家門口幾台路由器就會被丟掉（traceroute 正是利用這招）。");
+  if(sip===dip) warns.push("提示：來源和目的 IP 一樣——這是在寄信給自己。");
+  const protoNum=proto==="TCP"?6:proto==="UDP"?17:1;
+  const l4len=l4.bytes.length+(proto==="ICMP"?0:payload.length);
+  const ip=ipLayer({src:sip,dst:dip,ttl,proto:protoNum,protoName:proto,payLen:l4len});
+  const eth=ethLayer("3C:2E:F9:4A:1B:7D","74:85:C4:98:00:01",0x0800,"IPv4");
+  const layers=[eth,ip,l4];
+  let payField=null;
+  if(proto!=="ICMP"&&payload.length){
+    layers.push(rawLayer("資料","var(--c-http)",[...payload],[
+      {k:"內容",v:payload.length+" bytes",off:0,len:payload.length,d:bDescs.payload[1]}
+    ],""));
+  }
+  bBuf=assemble(layers); bLayers=layers;
+  /* 欄位對照表：data-f → {abs,len} */
+  bFields={
+    smac:{abs:eth.fields[1].abs,len:6}, dmac:{abs:eth.fields[0].abs,len:6},
+    proto:{abs:ip.fields[4].abs,len:1},
+    sip:{abs:ip.fields[6].abs,len:4}, dip:{abs:ip.fields[7].abs,len:4}, ttl:{abs:ip.fields[3].abs,len:1},
+  };
+  Object.entries(fmap).forEach(([key,fi])=>{ const f=l4.fields[fi]; bFields[key]={abs:f.abs,len:f.len}; });
+  if(proto==="ICMP") bFields.payload={abs:l4.fields[4].abs,len:Math.max(l4.fields[4].len,1)};
+  else if(payload.length) bFields.payload={abs:layers[3].fields[0].abs,len:payload.length};
+  renderHex(bHexBox,bBuf,layers);
+  renderLegend(document.getElementById("bLegend"),layers);
+  const parts=layers.map(l=>`${l.name.split("（")[0]} ${l.bytes.length}`);
+  document.getElementById("bSize").textContent=`整個封包 ${bBuf.length} bytes ＝ ${parts.join(" ＋ ")}`;
+  document.getElementById("bWarns").innerHTML=warns.map(w=>`<div class="warnrow">${w}</div>`).join("");
+  const focused=document.activeElement?.closest?.("[data-f]")||document.activeElement;
+  const key=focused?.dataset?.f || focused?.closest?.("[data-f]")?.dataset?.f;
+  if(key&&bFields[key]) hl(bHexBox,bFields[key].abs,bFields[key].len);
+}
+function showField(key){
+  const d=bDescs[key]; if(!d)return;
+  document.getElementById("bExplain").innerHTML=`<div class="ttl">${d[0]}</div>${d[1]}`;
+  if(bFields[key]) hl(bHexBox,bFields[key].abs,bFields[key].len);
+}
+document.querySelectorAll("#tab2 [data-f]").forEach(el=>{
+  const key=el.dataset.f;
+  el.addEventListener("focusin",()=>showField(key));
+  el.addEventListener("click",()=>showField(key));
+  el.addEventListener("input",rebuild);
+  el.addEventListener("change",rebuild);
+});
+
+/* ================= 分頁切換 ================= */
+function switchTab(n){
+  document.getElementById("tab1").hidden=n!==1;
+  document.getElementById("tab2").hidden=n!==2;
+  document.getElementById("tabBtn1").setAttribute("aria-selected",n===1);
+  document.getElementById("tabBtn2").setAttribute("aria-selected",n===2);
+  if(n===2) rebuild();
+}
+(function init(){
+  const h=location.hash.replace("#","");
+  if(h==="builder") switchTab(2); else rebuild();
+  /* 預先放一組示範流量，打開就有東西可以點 */
+  runScenario("web");
+  setTimeout(()=>{ const first=listBody.querySelector(".prow"); if(first&&selectedNo===null) selectPacket(+first.dataset.no); },300);
+})();
+</script>
+
+</body>
+</html>
